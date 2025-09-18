@@ -2,8 +2,7 @@ import time
 import scipy as sp
 import numpy as np
 import networkx as nx
-from numba import jit, njit, prange, uint32, uint64, float64, types, jit_module
-from numba.typed import List, Dict
+from numba import njit, prange, jit_module
 
 UINT32_MAX = np.iinfo(np.uint32).max
 
@@ -33,7 +32,7 @@ class Poset:
         self.nivcol, self.nivrow = self.__make_niv_csr_compressed()
         if self.verbose:
             toc = time.time()
-            print(f"NIV construction took {toc - tic:.2f} seconds")
+            print(f"Niv construction took {toc - tic:.2f} seconds")
             tic = time.time()
 
         self.levelcol, self.levelrow = self.__prep_parallel()
@@ -145,7 +144,7 @@ class Poset:
         """
         successor = self.__make_successor()
 
-        chain_id: Dict[Hashable, int] = {}
+        chain_id = {}
         n_chains = 0
         for start in range(self.V):
             if start in chain_id:
@@ -173,10 +172,10 @@ class Poset:
     @staticmethod
     @njit
     def __jitted_niv_csr_compressed(V, chain_id, successor, row, col, n_chains):
-        nivcol: list[int] = []
+        nivcol = []
         nivrow = [0, 0]
         nivfield = np.full(n_chains, UINT32_MAX, dtype=np.uint32)
-        inserted: list[int] = []
+        inserted = []
 
         for v in range(V - 1, -1, -1):
             v_id = chain_id[v]
@@ -216,38 +215,12 @@ class Poset:
 
         return self.__jitted_niv_csr_compressed(self.V, self.chain_id, self.successor, row, col, self.n_chains)
         
-
-    def __prep_parallel(self):
-        row = self.row
-        col = self.col
-
-        revcol = np.zeros_like(col)
-        revrow = np.zeros_like(row)
-        leaves = []
-        outdegrees = np.zeros(self.V, dtype=np.int32)
-        levelcol = np.zeros(self.V, dtype=np.int32)
-        
-        
-        # prepare all the structures
-        g = [[] for _ in range(self.V)]
-        for i in range(self.V):
-            for j in range(row[i], row[i + 1]):
-                g[col[j]].append(i)
-
-            outdegrees[i] = row[i + 1] - row[i]
-            if row[i + 1] - row[i] == 0:
-                leaves.append(i)
-
-        inserted = 0
-        revrow[0] = 0
-        for i in range(self.V):
-            for j in g[i]:
-                revcol[inserted] = j
-                inserted += 1
-            revrow[i + 1] = inserted
-
-
+    @staticmethod
+    @njit
+    def __jitted_prep_parallel(V, leaves, revrow, revcol, outdegrees):
         # compute antichains
+        levelcol = np.zeros(V, dtype=np.int32)
+
         index = 0
         while len(leaves) > 0:
             l = leaves.pop()
@@ -259,7 +232,7 @@ class Poset:
         levelrow.append(0)
         levelrow.append(index)
 
-        remaining = self.V - index
+        remaining = V - index
         i = 0
         j = 0
         while remaining > 0:
@@ -280,6 +253,34 @@ class Poset:
         levelrow = np.asarray(levelrow, dtype=np.uint64)
         levelcol = np.asarray(levelcol, dtype=np.uint32)
 
+        return levelcol, levelrow
+    
+    def __prep_parallel(self):
+        revcol = np.zeros_like(self.col)
+        revrow = np.zeros_like(self.row)
+        leaves = []
+        outdegrees = np.zeros(self.V, dtype=np.int32)
+        
+        
+        # prepare all the structures
+        g = [[] for _ in range(self.V)]
+
+        for i in range(self.V):
+            for j in range(self.row[i], self.row[i + 1]):
+                g[self.col[j]].append(i)
+
+            outdegrees[i] = self.row[i + 1] - self.row[i]
+            if self.row[i + 1] - self.row[i] == 0:
+                leaves.append(i)
+
+        inserted = 0
+        revrow[0] = 0
+        for i in range(self.V):
+            for j in g[i]:
+                revcol[inserted] = j
+                inserted += 1
+            revrow[i + 1] = inserted
+        levelcol, levelrow = self.__jitted_prep_parallel(self.V, leaves, revrow, revcol, outdegrees)
         return levelcol, levelrow
 
     def zeta(self, x, parallel=False):
